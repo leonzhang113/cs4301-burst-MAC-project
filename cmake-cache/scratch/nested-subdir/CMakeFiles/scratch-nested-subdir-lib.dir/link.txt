@@ -1,0 +1,2 @@
+/usr/bin/ar qc /Users/leonzhang/Documents/school/cs4301/project/cs4301-burst-MAC-project/ns3-temp/build/lib/libscratch-nested-subdir-lib.a "CMakeFiles/scratch-nested-subdir-lib.dir/lib/scratch-nested-subdir-library-source.cc.o"
+/usr/bin/ranlib /Users/leonzhang/Documents/school/cs4301/project/cs4301-burst-MAC-project/ns3-temp/build/lib/libscratch-nested-subdir-lib.a
