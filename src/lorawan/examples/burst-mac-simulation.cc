@@ -121,7 +121,7 @@ int main(int argc, char* argv[])
     appContainer.Start(Time(0));
     appContainer.Stop(appStopTime);
 
-    /*for (auto node = endDevices.Begin(); node != endDevices.End(); node++)
+    for (auto node = endDevices.Begin(); node != endDevices.End(); node++)
     {
         DynamicCast<LoraNetDevice>((*node)->GetDevice(0))
             ->GetPhy()
@@ -133,7 +133,7 @@ int main(int argc, char* argv[])
         DynamicCast<LoraNetDevice>((*node)->GetDevice(0))
             ->GetPhy()
             ->TraceConnectWithoutContext("ReceivedPacket", MakeCallback(OnPacketReceptionCallback));
-    }*/
+    }
 
     Simulator::Stop(appStopTime + Hours(1));
     NS_LOG_INFO("Running simulation...");
