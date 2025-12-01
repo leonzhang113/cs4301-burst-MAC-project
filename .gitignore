@@ -1,3 +1,5 @@
 cmake-cache/
 build/
 .lock-ns3*
+build/
+__pycache__
