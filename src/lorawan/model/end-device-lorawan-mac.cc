@@ -36,6 +36,11 @@ EndDeviceLorawanMac::GetTypeId()
         TypeId("ns3::EndDeviceLorawanMac")
             .SetParent<LorawanMac>()
             .SetGroupName("lorawan")
+            .AddAttribute("BurstThreshold",
+                          "Packets-per-second threshold to switch into burst mode.",
+                          DoubleValue(1.0),
+                          MakeDoubleAccessor(&EndDeviceLorawanMac::m_burstThreshold),
+                          MakeDoubleChecker<double>(0.0))
             .AddTraceSource("RequiredTransmissions",
                             "Total number of transmissions required to deliver this packet",
                             MakeTraceSourceAccessor(&EndDeviceLorawanMac::m_requiredTxCallback),
@@ -95,7 +100,11 @@ EndDeviceLorawanMac::GetTypeId()
 }
 
 EndDeviceLorawanMac::EndDeviceLorawanMac()
-    : m_nbTrans(1),
+        : m_packetCount(0),
+            m_lastResetTime(0.0),
+            m_burstActive(false),
+            m_burstThreshold(1.0),
+      m_nbTrans(1),
       m_dataRate(0),
       m_txPowerDbm(14),
       m_codingRate(1),
@@ -144,6 +153,15 @@ void
 EndDeviceLorawanMac::Send(Ptr<Packet> packet)
 {
     NS_LOG_FUNCTION(this << packet);
+
+    double now = Simulator::Now().GetSeconds();
+    //reset every second
+    if(now - m_lastResetTime >= 1.0){
+        m_packetCount = 0;
+        m_lastResetTime = now;
+    }
+    m_packetCount++;
+    m_burstActive = m_packetCount > m_burstThreshold;
 
     // Retx are scheduled by Receive, FailedReception, CloseSecondReceiveWindow only if retxLeft > 0
     NS_ASSERT_MSG(packet != m_retxParams.packet || m_retxParams.retxLeft > 0,
@@ -462,6 +480,20 @@ EndDeviceLorawanMac::ApplyNecessaryOptions(LorawanMacHeader& macHeader)
 
     macHeader.SetMType(m_mType);
     macHeader.SetMajor(1);
+    // Propagate node-side burst detection into the uplink MAC header
+    macHeader.SetBurst(m_burstActive);
+}
+
+void
+EndDeviceLorawanMac::SetBurstThreshold(double threshold)
+{
+    m_burstThreshold = threshold;
+}
+
+double
+EndDeviceLorawanMac::GetBurstThreshold() const
+{
+    return m_burstThreshold;
 }
 
 void

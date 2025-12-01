@@ -20,7 +20,8 @@ namespace lorawan
 NS_LOG_COMPONENT_DEFINE("LorawanMacHeader");
 
 LorawanMacHeader::LorawanMacHeader()
-    : m_major(0)
+    : m_major(0),
+    m_burst(false)
 {
 }
 
@@ -61,7 +62,11 @@ LorawanMacHeader::Serialize(Buffer::Iterator start) const
     // The MType
     header |= m_mtype << 5;
 
-    // Do nothing for the bits that are RFU
+    // Burst bits
+    if (m_burst)
+    {
+        header |= 0b00010000;
+    }
 
     // The major version bits
     header |= m_major;
@@ -84,6 +89,9 @@ LorawanMacHeader::Deserialize(Buffer::Iterator start)
     // Get the 2 least significant bits to have the Major
     m_major = byte & 0b11;
 
+    //get 4th bit for burst bits
+    m_burst = (byte & 0b00010000);
+
     // Move the three most significant bits to the least significant positions
     // to get the MType
     m_mtype = byte >> 5;
@@ -96,6 +104,7 @@ LorawanMacHeader::Print(std::ostream& os) const
 {
     os << "MessageType=" << unsigned(m_mtype);
     os << ", Major=" << unsigned(m_major);
+    os << ", Burst=" << m_burst;
 }
 
 void

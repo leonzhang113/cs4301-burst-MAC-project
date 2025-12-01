@@ -32,7 +32,15 @@ namespace lorawan
  */
 class EndDeviceLorawanMac : public LorawanMac
 {
+  private:
+      uint32_t m_packetCount{0};
+      double m_lastResetTime{0.0};
+      bool m_burstActive{false};
+      double m_burstThreshold{1.0};
+
   public:
+    void SetBurstThreshold(double threshold);
+    double GetBurstThreshold() const;
     /**
      *  Register this type.
      *  @return The object TypeId.

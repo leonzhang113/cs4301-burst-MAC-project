@@ -9,6 +9,7 @@
 #include "ns3/network-server-helper.h"
 #include "ns3/forwarder-helper.h"
 #include "ns3/periodic-sender-helper.h"
+#include "ns3/periodic-sender.h"
 
 #include <iostream>
 #include <vector>
@@ -20,31 +21,90 @@ NS_LOG_COMPONENT_DEFINE("LoraPdrSimulation");
 
 uint64_t packetsSent = 0;
 uint64_t packetsReceived = 0;
+uint64_t packetsWithBurstBit = 0;
+
+std::map<uint32_t, std::deque<Time>> channelPacketTimes;
+double collisionWindow = 1e-3; 
+double collisionThreshold = 0.5; // make threshold for collisions 50%, can set to any value between 0 and 1
+uint64_t totalReceived = 0;
+uint64_t totalCollisions = 0;
 
 void OnTransmissionCallback(Ptr<const Packet> packet, uint32_t senderNodeId)
 {
-    NS_LOG_INFO("Packet sent by node " << senderNodeId);
+    //NS_LOG_INFO("Packet sent by node " << senderNodeId);
     packetsSent++;
 }
 
 void OnPacketReceptionCallback(Ptr<const Packet> packet, uint32_t receiverNodeId)
 {
-    NS_LOG_INFO("Packet received by gateway " << receiverNodeId);
+    //NS_LOG_INFO("Packet received by gateway " << receiverNodeId);
     packetsReceived++;
+    totalReceived++;
+
+    Ptr<Packet> copy = packet->Copy();
+    LorawanMacHeader hdr;
+    copy->PeekHeader(hdr);
+
+    // burst detection
+    if (hdr.GetBurst())
+    {
+        NS_LOG_WARN("Burst-MAC triggered by burst bit at gateway " << receiverNodeId);
+        packetsWithBurstBit++;
+        std::cout << "[GW " << receiverNodeId << "] burst bit detected at t="
+                  << Simulator::Now().GetSeconds() << "s" << std::endl;
+    }
+
+    // Collision detection
+    uint32_t channel = 0; // for simplicity, assume all packets use same channel
+    Time now = Simulator::Now();
+    auto &times = channelPacketTimes[channel];
+
+    // Remove outdated entries
+    while (!times.empty() && (now - times.front()) > Seconds(collisionWindow))
+    {
+        times.pop_front();
+    }
+
+    // Count collisions
+    if (!times.empty())
+    {
+        totalCollisions++;
+        NS_LOG_WARN("Burst-MAC triggered by collision at gateway " << receiverNodeId);
+    }
+
+    times.push_back(now);
+
+    // Trigger Burst-MAC if collision ratio exceeds threshold
+    if (totalReceived > 0 && (double)totalCollisions / totalReceived > collisionThreshold)
+    {
+        NS_LOG_WARN("Burst-MAC triggered by collision ratio > threshold at gateway " << receiverNodeId);
+    }
 }
 
 int main(int argc, char* argv[])
 {
-    int nNodes = 1000;
+    int nNodes = 300;
     int nGateways = 1;
-    double radiusMeters = 2000;
+    double radiusMeters = 6000;
     double simulationTimeSeconds = 70.0;
     Time appStopTime = Seconds(simulationTimeSeconds);
+
+    // Burst scenario parameters (configurable via CLI)
+    double burstFraction = 1.0;   // [0..1] fraction of nodes that will burst
+    double burstStart = 10.0;     // set a time for burst signal to start
+    double normalPeriod = 10.0;   // set length of normal signal period
+    double burstPeriod = 0.1;     // length of burst signal period
+    double burstThreshold = 1.0;  // threshold for packets/sec that nodes need to set to burst
 
     CommandLine cmd(__FILE__);
     cmd.AddValue("nNodes", "Number of end devices", nNodes);
     cmd.AddValue("x", "Number of gateways", nGateways);
     cmd.AddValue("radius", "Radius of the deployment area in meters", radiusMeters);
+    cmd.AddValue("burstFraction", "Fraction of nodes that become bursty (0..1)", burstFraction);
+    cmd.AddValue("burstStart", "Time (s) when selected nodes switch to burst", burstStart);
+    cmd.AddValue("normalPeriod", "App period (s) before burst", normalPeriod);
+    cmd.AddValue("burstPeriod", "App period (s) during burst", burstPeriod);
+    cmd.AddValue("burstThreshold", "Packets/sec threshold to mark burst at MAC", burstThreshold);
     cmd.Parse(argc, argv);
 
     LogComponentEnable("LoraPdrSimulation", LOG_LEVEL_INFO);
@@ -114,12 +174,38 @@ int main(int argc, char* argv[])
     forHelper.Install(gateways);
 
     PeriodicSenderHelper appHelper = PeriodicSenderHelper();
-    appHelper.SetPeriod(Seconds(6));
+    appHelper.SetPeriod(Seconds(normalPeriod));
     appHelper.SetPacketSize(24);
 
     ApplicationContainer appContainer = appHelper.Install(endDevices);
     appContainer.Start(Time(0));
     appContainer.Stop(appStopTime);
+
+    // apply the burst threshold to all end devices
+    for (uint32_t i = 0; i < endDevices.GetN(); ++i)
+    {
+        auto dev = DynamicCast<LoraNetDevice>(endDevices.Get(i)->GetDevice(0));
+        auto mac = DynamicCast<EndDeviceLorawanMac>(dev->GetMac());
+        if (mac)
+        {
+            mac->SetBurstThreshold(burstThreshold);
+        }
+    }
+
+    // Select a subset of nodes to become burst nodes based on the percentage set
+    uint32_t nBurst = std::max<uint32_t>(1, std::min<uint32_t>(endDevices.GetN(), std::lround(burstFraction * endDevices.GetN())));
+    for (uint32_t i = 0; i < endDevices.GetN(); ++i)
+    {
+        if (i < nBurst)
+        {
+            Ptr<Application> app = appContainer.Get(i);
+            Ptr<lorawan::PeriodicSender> ps = app->GetObject<lorawan::PeriodicSender>();
+            if (ps)
+            {
+                Simulator::Schedule(Seconds(burstStart), &lorawan::PeriodicSender::SetInterval, ps, Seconds(burstPeriod));
+            }
+        }
+    }
 
     for (auto node = endDevices.Begin(); node != endDevices.End(); node++)
     {
@@ -150,6 +236,7 @@ int main(int argc, char* argv[])
     std::cout << "Total packets sent: " << packetsSent << std::endl;
     std::cout << "Total packets received: " << packetsReceived << std::endl;
     std::cout << "Packet Delivery Ratio (PDR): " << pdr * 100.0 << "%" << std::endl;
+    std::cout << "Packets with burst bit: " << packetsWithBurstBit << std::endl;
     std::cout << "--------------------------" << std::endl;
 
     LoraPacketTracker& tracker = helper.GetPacketTracker(); 
@@ -176,7 +263,7 @@ int main(int argc, char* argv[])
     //LogComponentEnable("LorawanMacHelper", LOG_LEVEL_ALL);
     //LogComponentEnable("OneShotSenderHelper", LOG_LEVEL_ALL);
     //LogComponentEnable("OneShotSender", LOG_LEVEL_ALL);
-    //LogComponentEnable("LorawanMacHeader", LOG_LEVEL_ALL);
+    LogComponentEnable("LorawanMacHeader", LOG_LEVEL_ALL);
     //LogComponentEnable("LoraFrameHeader", LOG_LEVEL_ALL);
 
     //LogComponentEnableAll(LOG_PREFIX_FUNC);

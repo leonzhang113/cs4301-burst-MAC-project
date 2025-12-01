@@ -24,6 +24,14 @@ namespace lorawan
  */
 class GatewayLorawanMac : public LorawanMac
 {
+
+  private:
+    uint32_t m_collisionCount{0};      
+    uint32_t m_packetCount{0};             
+    double m_lastResetTime{0.0};     
+    bool m_burstMacActive{false};          
+    double m_burstThreshold{0.1};
+
   public:
     /**
      *  Register this type.

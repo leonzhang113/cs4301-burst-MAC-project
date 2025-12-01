@@ -118,6 +118,31 @@ GatewayLorawanMac::Receive(Ptr<const Packet> packet)
         NS_LOG_DEBUG("Received packet: " << packet);
 
         m_receivedPacket(packet);
+
+        //burst detection
+        m_packetCount++;
+
+        // if packet is burst mode
+        if (macHdr.GetBurst())
+        {
+            NS_LOG_WARN("Node signaled burst mode.");
+            m_burstMacActive = true;
+        }
+
+        double now = Simulator::Now().GetSeconds();
+        if (now - m_lastResetTime >= 1.0) // reset counters every second
+        {
+            double collisionRate = (double)m_collisionCount / (double)m_packetCount;
+            if (collisionRate > m_burstThreshold)
+            {
+                NS_LOG_WARN("Collision rate exceeded threshold, activating Burst-MAC");
+                m_burstMacActive = true;
+            }
+
+            m_collisionCount = 0;
+            m_packetCount = 0;
+            m_lastResetTime = now;
+        }
     }
     else
     {

@@ -23,6 +23,13 @@ namespace lorawan
  */
 class LorawanMacHeader : public Header
 {
+  private:
+      bool m_burst;
+
+  public:
+      void SetBurst(bool b) { m_burst = b; }
+      bool GetBurst() { return m_burst; }
+
   public:
     /**
      * The message type.
