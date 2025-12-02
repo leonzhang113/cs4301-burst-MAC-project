@@ -10,6 +10,7 @@
 #include "ns3/forwarder-helper.h"
 #include "ns3/periodic-sender-helper.h"
 #include "ns3/periodic-sender.h"
+#include "ns3/lora-tag.h"
 
 #include <iostream>
 #include <vector>
@@ -23,7 +24,10 @@ uint64_t packetsSent = 0;
 uint64_t packetsReceived = 0;
 uint64_t packetsWithBurstBit = 0;
 
-std::map<uint32_t, std::deque<Time>> channelPacketTimes;
+// Virtual Channels, channel, SF pair
+using VCKey = std::pair<uint32_t, uint8_t>;
+std::map<VCKey, std::deque<Time>> vcPacketTimes;
+std::map<VCKey, uint64_t> vcReceivedCounts;
 double collisionWindow = 1e-3; 
 double collisionThreshold = 0.5; // make threshold for collisions 50%, can set to any value between 0 and 1
 uint64_t totalReceived = 0;
@@ -35,9 +39,9 @@ void OnTransmissionCallback(Ptr<const Packet> packet, uint32_t senderNodeId)
     packetsSent++;
 }
 
-void OnPacketReceptionCallback(Ptr<const Packet> packet, uint32_t receiverNodeId)
+void OnPacketRecptionCallback(std::string context, Ptr<const Packet> packet)
 {
-    //NS_LOG_INFO("Packet received by gateway " << receiverNodeId);
+    //NS_LOG_INFO("Packet received at MAC context: " << context);
     packetsReceived++;
     totalReceived++;
 
@@ -48,16 +52,24 @@ void OnPacketReceptionCallback(Ptr<const Packet> packet, uint32_t receiverNodeId
     // burst detection
     if (hdr.GetBurst())
     {
-        NS_LOG_WARN("Burst-MAC triggered by burst bit at gateway " << receiverNodeId);
         packetsWithBurstBit++;
-        std::cout << "[GW " << receiverNodeId << "] burst bit detected at t="
+        std::cout << "Burst bit detected at t="
                   << Simulator::Now().GetSeconds() << "s" << std::endl;
     }
 
-    // Collision detection
-    uint32_t channel = 0; // for simplicity, assume all packets use same channel
+    // Extract freq, sf from LoraTag
+    VCKey vc{0u, 0u};
+    LoraTag rxTag;
+    Ptr<Packet> tagProbe = packet->Copy();
+    if (tagProbe->PeekPacketTag(rxTag))
+    {
+        vc.first = rxTag.GetFrequency();
+        vc.second = rxTag.GetSpreadingFactor();
+    }
+
+    vcReceivedCounts[vc]++;
     Time now = Simulator::Now();
-    auto &times = channelPacketTimes[channel];
+    auto &times = vcPacketTimes[vc];
 
     // Remove outdated entries
     while (!times.empty() && (now - times.front()) > Seconds(collisionWindow))
@@ -65,11 +77,12 @@ void OnPacketReceptionCallback(Ptr<const Packet> packet, uint32_t receiverNodeId
         times.pop_front();
     }
 
-    // Count collisions
+    // Count collisions only within same VC window
     if (!times.empty())
     {
         totalCollisions++;
-        NS_LOG_WARN("Burst-MAC triggered by collision at gateway " << receiverNodeId);
+        NS_LOG_WARN("Collision in VC(f=" << vc.first << ",sf=" << unsigned(vc.second)
+                                         << ") at gateway (MAC)");
     }
 
     times.push_back(now);
@@ -77,34 +90,30 @@ void OnPacketReceptionCallback(Ptr<const Packet> packet, uint32_t receiverNodeId
     // Trigger Burst-MAC if collision ratio exceeds threshold
     if (totalReceived > 0 && (double)totalCollisions / totalReceived > collisionThreshold)
     {
-        NS_LOG_WARN("Burst-MAC triggered by collision ratio > threshold at gateway " << receiverNodeId);
+        NS_LOG_WARN("Burst-MAC triggered by collision ratio > threshold at gateway");
     }
 }
 
 int main(int argc, char* argv[])
 {
-    int nNodes = 300;
+    int nNodes = 500;
     int nGateways = 1;
     double radiusMeters = 6000;
     double simulationTimeSeconds = 70.0;
     Time appStopTime = Seconds(simulationTimeSeconds);
 
     // Burst scenario parameters (configurable via CLI)
-    double burstFraction = 1.0;   // [0..1] fraction of nodes that will burst
-    double burstStart = 10.0;     // set a time for burst signal to start
-    double normalPeriod = 10.0;   // set length of normal signal period
+    double burstFraction = 50.0;   // [0..1] fraction of nodes that will burst
+    double burstStart = 0.0;     // set a time for burst signal to start
+    double normalPeriod = 1;   // set length of normal signal period
     double burstPeriod = 0.1;     // length of burst signal period
-    double burstThreshold = 1.0;  // threshold for packets/sec that nodes need to set to burst
+    double burstThreshold = 0.0;  // threshold for packets/sec that nodes need to set to burst
+    double baseSlotL = 0.2;       // base slot duration (seconds) for hash scheduling
 
     CommandLine cmd(__FILE__);
     cmd.AddValue("nNodes", "Number of end devices", nNodes);
     cmd.AddValue("x", "Number of gateways", nGateways);
     cmd.AddValue("radius", "Radius of the deployment area in meters", radiusMeters);
-    cmd.AddValue("burstFraction", "Fraction of nodes that become bursty (0..1)", burstFraction);
-    cmd.AddValue("burstStart", "Time (s) when selected nodes switch to burst", burstStart);
-    cmd.AddValue("normalPeriod", "App period (s) before burst", normalPeriod);
-    cmd.AddValue("burstPeriod", "App period (s) during burst", burstPeriod);
-    cmd.AddValue("burstThreshold", "Packets/sec threshold to mark burst at MAC", burstThreshold);
     cmd.Parse(argc, argv);
 
     LogComponentEnable("LoraPdrSimulation", LOG_LEVEL_INFO);
@@ -181,6 +190,54 @@ int main(int argc, char* argv[])
     appContainer.Start(Time(0));
     appContainer.Stop(appStopTime);
 
+    // hash task scheduling
+    std::map<uint8_t, std::vector<uint32_t>> sfToNodeIds;
+    for (uint32_t i = 0; i < endDevices.GetN(); ++i)
+    {
+        auto dev = DynamicCast<LoraNetDevice>(endDevices.Get(i)->GetDevice(0));
+        auto mac = DynamicCast<EndDeviceLorawanMac>(dev->GetMac());
+        uint8_t dr = mac->GetDataRate();
+        uint8_t sf = mac->GetSfFromDataRate(dr);
+
+        //hash nodes based on sf
+        sfToNodeIds[sf].push_back(endDevices.Get(i)->GetId());
+    }
+
+    //get the time slot based on sf
+    auto sfMultiplier = [&](uint8_t sf) -> uint32_t {
+        switch (sf)
+        {
+            case 7: return 1;
+            case 8: return 2;
+            case 9: return 3;
+            case 10: return 4;
+            default: return 4;
+        }
+    };
+
+    
+    for (const auto &entry : sfToNodeIds)
+    {
+        uint8_t sf = entry.first;
+        const auto &nodes = entry.second;
+        if (nodes.empty()) continue;
+
+        uint32_t groupSize = static_cast<uint32_t>(nodes.size());
+        double slotLen = baseSlotL * sfMultiplier(sf);
+        double superframe = slotLen * groupSize;
+
+        for (uint32_t nid : nodes)
+        {
+            uint32_t slot = nid % groupSize;
+            Ptr<Application> app = appContainer.Get(nid);
+            Ptr<lorawan::PeriodicSender> ps = app->GetObject<lorawan::PeriodicSender>();
+            if (ps)
+            {
+                Simulator::Schedule(Seconds(slot * slotLen), &lorawan::PeriodicSender::SetInterval, ps, Seconds(superframe));
+            }
+        }
+    }
+
     // apply the burst threshold to all end devices
     for (uint32_t i = 0; i < endDevices.GetN(); ++i)
     {
@@ -214,11 +271,12 @@ int main(int argc, char* argv[])
             ->TraceConnectWithoutContext("StartSending", MakeCallback(OnTransmissionCallback));
     }
 
+    // Connect to MAC-layer ReceivedPacket
     for (auto node = gateways.Begin(); node != gateways.End(); node++)
     {
-        DynamicCast<LoraNetDevice>((*node)->GetDevice(0))
-            ->GetPhy()
-            ->TraceConnectWithoutContext("ReceivedPacket", MakeCallback(OnPacketReceptionCallback));
+        auto mac = DynamicCast<LoraNetDevice>((*node)->GetDevice(0))->GetMac();
+        std::string ctx = std::string("GW-") + std::to_string((*node)->GetId());
+        mac->TraceConnect("ReceivedPacket", ctx, MakeCallback(OnPacketRecptionCallback));
     }
 
     Simulator::Stop(appStopTime + Hours(1));
@@ -238,6 +296,17 @@ int main(int argc, char* argv[])
     std::cout << "Packet Delivery Ratio (PDR): " << pdr * 100.0 << "%" << std::endl;
     std::cout << "Packets with burst bit: " << packetsWithBurstBit << std::endl;
     std::cout << "--------------------------" << std::endl;
+
+    // track vc
+    if (!vcReceivedCounts.empty())
+    {
+        std::cout << "VC groups observed (frequency Hz, SF) -> packet count" << std::endl;
+        for (const auto &kv : vcReceivedCounts)
+        {
+            std::cout << "  (" << kv.first.first << ", SF" << unsigned(kv.first.second)
+                      << ") -> " << kv.second << std::endl;
+        }
+    }
 
     LoraPacketTracker& tracker = helper.GetPacketTracker(); 
     std::cout << tracker.CountMacPacketsGlobally(Seconds(0), appStopTime + Hours(1)) << std::endl;
